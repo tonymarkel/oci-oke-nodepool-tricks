@@ -36,9 +36,6 @@ create_and_attach_volume() {
     --wait-for-state AVAILABLE --auth instance_principal --query "data.id")
   log "Volume $display_name created: $volume_id"
   log "Attaching volume $display_name to $device_path"
-  log "oci compute volume-attachment attach --type paravirtualized \
-    --instance-id "$instance" --volume-id "$volume_id" \
-    --device "$device_path" --wait-for-state ATTACHED --auth instance_principal"
   oci compute volume-attachment attach --type paravirtualized \
     --instance-id "$instance" --volume-id "$volume_id" \
     --device "$device_path" --wait-for-state ATTACHED --auth instance_principal
