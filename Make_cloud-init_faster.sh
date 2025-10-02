@@ -1,17 +1,18 @@
 #!/bin/bash
 # Runs instance operations in parallel to OKE operations
-# in order to speed up node ready times for OKE
-# This script is provided as-is with no warranties expressed or implied
+# in order to speed up node ready times for OKE. Useful
+# if there are configurations that are unique to the node.
+# This script builds on optimizations by creating a custom
+# node imge.
+
+# Functions:
+#  - Adds Block Volumes
+#  - Attaches and Configures a Secondary NIC
+#    Note: Assumes subnet is named oke-secondary-vnic-subnet
+
+# NOTE: This script is provided as-is with no warranties expressed or implied
 
 set -euo pipefail
-
-LOGFILE="${LOGFILE:-/var/log/ads-bv.log}"
-
-# Redirect output to log file
-if [ "$(id -u)" -ne 0 ] || [ ! -w "$(dirname "$LOGFILE")" ]; then
-  LOGFILE="$HOME/ads-bv.log"
-fi
-exec > >(tee -a "$LOGFILE") 2>&1
 
 # Logging function to prepend timestamps
 log() {
@@ -20,19 +21,16 @@ log() {
 
 # Function to create and attach a volume
 create_and_attach_volume() {
-  local compartment_id="$1"
-  local availability_domain="$2"
-  local display_name="$3"
-  local size_in_gbs="$4"
-  local vpus_per_gb="$5"
-  local device_path="$6"
-  local instance_id="$7"
-  local volume_name="$8"
-  local device_name="$9"
+  local display_name="$1"
+  local size_in_gbs="$2"
+  local vpus_per_gb="$3"
+  local device_path="$4"
+  local volume_name="$5"
+  local device_name="$6"
   
   log "Creating volume $display_name ($size_in_gbs G, vpus-per-gb=$vpus_per_gb)"
-  local volume_id=$(oci bv volume create --compartment-id "$compartment_id" \
-    --availability-domain "$availability_domain" \
+  local volume_id=$(oci bv volume create --compartment-id "$compartment" \
+    --availability-domain "$ad" \
     --display-name "$display_name" --size-in-gbs "$size_in_gbs" \
     --vpus-per-gb "$vpus_per_gb" \
     --wait-for-state AVAILABLE --query 'data.id' --raw-output)
@@ -40,7 +38,7 @@ create_and_attach_volume() {
 
   log "Attaching volume $display_name to $device_path"
   oci compute volume-attachment attach --type paravirtualized \
-    --instance-id "$instance_id" --volume-id "$volume_id" \
+    --instance-id "$instance" --volume-id "$volume_id" \
     --device "$device_path" --wait-for-state ATTACHED
   log "Volume $display_name attached"
   log "Formatting $device_name as ext4 with label $volume_name"
@@ -48,7 +46,21 @@ create_and_attach_volume() {
   log "Formatted $device_name"
 }
 
-create
+# See if there is a network on the secondary already. If not, attach one and configure it.
+create_and_attach_vnic () {
+  vnics=$(curl -H "Authorization: Bearer Oracle" http://169.254.169.254/opc/v2/vnics | jq -r .[].vlanTag | uniq | wc -l)
+  if [ $vnics -lt 2 ]; then
+    log "Creating and attaching vnic"
+    oci compute instance attach-vnic --instance-id $instance --subnet-id $subnetid --wait --skip-source-dest-check TRUE --auth instance_principal
+    # --assign-public-ip true # if you want a public IP on the secondary VNIC
+    sleep 15 # wait for the VNIC to be fully attached before configuring
+    log "Configuring secondary vnic"
+    sudo oci-network-config configure
+    log "Secondary vnic attached and configured"
+  else
+    log "Secondary VNIC already configured"
+  fi
+}
 
 log "Starting cloud-init script, writing to $LOGFILE"
 
@@ -68,24 +80,33 @@ log "OCI CLI version: $(oci --version)"
 
 # --- auth & metadata ---
 log "Fetching instance metadata"
-export OCI_CLI_AUTH=instance_principal
-META=$(curl -sS -H "Authorization: Bearer Oracle" http://169.254.169.254/opc/v2/instance)
-instance=$(echo "$META" | jq -r '.id')
-compartment=$(echo "$META" | jq -r '.compartmentId')
-ad=$(echo "$META" | jq -r '.availabilityDomain' | tr -d '\r')
-region=$(echo "$META" | jq -r '.regionInfo.regionIdentifier // .canonicalRegionName // .region')
+# Get instance information
+metadata=$(curl -H "Authorization: Bearer Oracle" http://169.254.169.254/opc/v2/instance/)
+instance=$(echo $metadata | jq -r .id)
+compartment=$(echo $metadata | jq -r .compartmentId)
+region=$(echo $metadata | jq -r .region)
+ad=$(echo $metadata | jq .availabilityDomain)
+vnics=$(curl -H "Authorization: Bearer Oracle" http://169.254.169.254/opc/v2/vnics/)
+primary_vnicid=$(echo $vnics | jq -r '.[0].vnicId')
+vcn_compartment=$(oci network vnic get --vnic-id $primary_vnicid --auth instance_principal | jq -r '.data."compartment-id"')
+subnets=$(oci network subnet list --compartment-id $vcn_compartment --auth instance_principal)
+vcn=$(echo $subnets | jq -r '.data[] | select(."display-name" == "oke-secondary-vnic-subnet")."vcn-id"')
+subnetid=$(echo $subnets | jq -r '.data[] | select(."display-name" == "oke-secondary-vnic-subnet").id')
 export OCI_CLI_REGION="$region"
+export OCI_CLI_AUTH=instance_principal
+
 log "Retrieved metadata: instance=$instance, compartment=$compartment, ad=$ad, region=$region"
 
-# --- create and attach two block volumes in parallel ---
-log "Creating and attaching volumes in parallel"
-create_and_attach_volume "$compartment" "$ad" "ads-$(hostname -s)-data1" 800 50 "/dev/oracleoci/oraclevdb" "$instance" "export" "/dev/sdb" &
-create_and_attach_volume "$compartment" "$ad" "ads-$(hostname -s)-data2" 800 50 "/dev/oracleoci/oraclevdc" "$instance" "export-data" "/dev/sdc" &
+# Create and attach two block volumes in parallel
+log "Creating, and attaching volumes in parallel"
+create_and_attach_volume "ads-$(hostname -s)-data1" 800 50 "/dev/oracleoci/oraclevdb" "/export" "/dev/sdb" &
+create_and_attach_volume "ads-$(hostname -s)-data2" 800 50 "/dev/oracleoci/oraclevdc" "/data" "/dev/sdc" &
 
-# Switch log file for taints section
-exec > >(tee -a /var/log/ads-taints.log) 2>&1
-log "Switching log output to /var/log/ads-taints.log"
+# Create and Attach one secondary VNIC in parallel
+log "Creating, attaching, and configuring a secondary vnic"
+create_and_attach_vnic &
 
+# Attach node to cluster
 log "Fetching and decoding OKE init script"
 curl -fsSL -H "Authorization: Bearer Oracle" http://169.254.169.254/opc/v2/instance/metadata/oke_init_script | base64 -d > /var/run/oke-init.sh
 chmod +x /var/run/oke-init.sh
