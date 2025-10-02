@@ -33,20 +33,22 @@ create_and_attach_volume() {
     --availability-domain "$ad" \
     --display-name "$display_name" --size-in-gbs "$size_in_gbs" \
     --vpus-per-gb "$vpus_per_gb" \
-    --wait-for-state AVAILABLE --query 'data.id' --raw-output)
+    --wait-for-state AVAILABLE --auth instance_principal --query "data.id")
   log "Volume $display_name created: $volume_id"
-
   log "Attaching volume $display_name to $device_path"
+  log "oci compute volume-attachment attach --type paravirtualized \
+    --instance-id "$instance" --volume-id "$volume_id" \
+    --device "$device_path" --wait-for-state ATTACHED --auth instance_principal"
   oci compute volume-attachment attach --type paravirtualized \
     --instance-id "$instance" --volume-id "$volume_id" \
-    --device "$device_path" --wait-for-state ATTACHED
+    --device "$device_path" --wait-for-state ATTACHED --auth instance_principal
   log "Volume $display_name attached"
   log "Formatting $device_name as ext4 with label $volume_name"
   mkfs -t ext4 -L $volume_name $device_name
   log "Formatted $device_name"
 }
 
-# See if there is a network on the secondary already. If not, attach one and configure it.
+# Function to see if there is a network on the secondary already. If not, attach one and configure it.
 create_and_attach_vnic () {
   vnics=$(curl -H "Authorization: Bearer Oracle" http://169.254.169.254/opc/v2/vnics | jq -r .[].vlanTag | uniq | wc -l)
   if [ $vnics -lt 2 ]; then
@@ -62,7 +64,7 @@ create_and_attach_vnic () {
   fi
 }
 
-log "Starting cloud-init script, writing to $LOGFILE"
+log "Starting cloud-init script, writing to STDOUT"
 
 # --- Install OCI CLI using package manager ---
 log "Checking for OCI CLI installation"
@@ -99,8 +101,8 @@ log "Retrieved metadata: instance=$instance, compartment=$compartment, ad=$ad, r
 
 # Create and attach two block volumes in parallel
 log "Creating, and attaching volumes in parallel"
-create_and_attach_volume "ads-$(hostname -s)-data1" 800 50 "/dev/oracleoci/oraclevdb" "/export" "/dev/sdb" &
-create_and_attach_volume "ads-$(hostname -s)-data2" 800 50 "/dev/oracleoci/oraclevdc" "/data" "/dev/sdc" &
+create_and_attach_volume "$(hostname -s)-export" 50 0 "/dev/oracleoci/oraclevdb" "export" "/dev/sdb" &
+create_and_attach_volume "$(hostname -s)-data" 50 0 "/dev/oracleoci/oraclevdc" "data" "/dev/sdc" &
 
 # Create and Attach one secondary VNIC in parallel
 log "Creating, attaching, and configuring a secondary vnic"
