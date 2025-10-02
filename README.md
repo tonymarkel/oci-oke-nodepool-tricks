@@ -1,12 +1,17 @@
 # Create a Custom Operating System Image for OKE Node Pools
-How to make custom images for OKE node pools using platform images.
+If you've tried to create a custom image for your node pools and run into issues of nodes not joining the cluster properly, nodes taking a long time to spin up, or you're just not sure how to make a custom image for your OKE node pools, this guide should help you.
 
-Prerequisites:
+This is a guide on how to make custom images for OKE node pools using platform images. It's not meant to be comprehenvise, but to outline the basic steps with console, cli, and terraform options for you to follow.
+
+### Prerequisites:
  * OCI CLI Installed and configured
- * Existing OKE Cluster
+ * An Existing OKE Cluster
  * Familiarity with the OCI Console and OCI Command Line Interface
+ * Familiarity with either Oracle Linux or Ubuntu
+ * (optional) Familiarity with the OCI Terraform Provider
 
 ## 1. Find a suitable platform image using the oci cli
+Using the command line and the OCI CLI, let's find an existing OKE platform image we can use as a base.
 
 ### For all x86 (AMD and Intel Shapes)
 ```bash
